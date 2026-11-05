@@ -89,8 +89,10 @@ pub enum Request {
     Action(Action),
     /// Choose the window that scoped input is delivered to.
     ///
-    /// `None` clears the choice. The window must be a Wayland window; X11 windows cannot
-    /// receive scoped input.
+    /// `None` clears the choice. The window must exist and have a Wayland toplevel, which
+    /// includes X11 applications proxied by xwayland-satellite: to the compositor they are
+    /// ordinary Wayland toplevels. An unknown id is an error and leaves the previous choice
+    /// untouched, so a caller that believes it switched or cleared the target cannot be wrong.
     ScopedTarget {
         /// Id of the window to deliver to, or `None` to stop delivering.
         window: Option<u64>,

@@ -380,11 +380,47 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             Response::PickedColor(color)
         }
         Request::ScopedTarget { window } => {
+            let (tx, rx) = async_channel::bounded(1);
             ctx.event_loop.insert_idle(move |state| {
-                let target = window.map(MappedId::from_raw);
-                state.niri.agent_pin.set_target(target);
-                state.refresh_agent_pin();
+                // Validate before touching the pin. Replying Handled to an unknown id used to
+                // leave the previous target receiving input while the caller believed it had
+                // switched or cleared, which is the opposite of failing closed.
+                let resolved = match window {
+                    None => Ok(None),
+                    Some(raw) => {
+                        let found = state
+                            .niri
+                            .layout
+                            .windows()
+                            .find(|(_, mapped)| mapped.id().get() == raw)
+                            // `toplevel()` is None for a compositor-native X11 window, which
+                            // has no scoped input path. Note that with the xwayland-satellite
+                            // integration X11 apps are satellite Wayland toplevels instead.
+                            .map(|(_, mapped)| mapped.window.toplevel().is_some());
+                        match found {
+                            None => Err(format!("scoped target: no window with id {raw}")),
+                            Some(false) => Err(format!(
+                                "scoped target: window {raw} has no Wayland toplevel, so there is no scoped input path; X11 applications proxied by xwayland-satellite are Wayland toplevels and are accepted"
+                            )),
+                            Some(true) => Ok(Some(MappedId::from_raw(raw))),
+                        }
+                    }
+                };
+                let reply = match resolved {
+                    Ok(target) => {
+                        state.niri.agent_pin.set_target(target);
+                        state.refresh_agent_pin();
+                        Ok(())
+                    }
+                    Err(err) => Err(err),
+                };
+                let _ = tx.send_blocking(reply);
             });
+            let reply = rx
+                .recv()
+                .await
+                .map_err(|_| String::from("error updating scoped target"))?;
+            reply?;
             Response::Handled
         }
         Request::ScopedScreenshot { window, path } => {
