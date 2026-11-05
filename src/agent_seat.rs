@@ -17,6 +17,7 @@ use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Size, SERIAL_COUNTER};
 
+use crate::layout::LayoutElement as _;
 use crate::niri::State;
 use crate::protocols::virtual_pointer::{
     VirtualPointerAxisEvent, VirtualPointerButtonEvent, VirtualPointerInputBackend,
@@ -139,9 +140,13 @@ impl State {
             .1;
 
         let surface = mapped.toplevel().wl_surface().clone();
-        // Set by the layout, falling back to the surface's current size, which is what we want
-        // to scale absolute pointer coordinates into.
-        let size = mapped.window.geometry().size;
+        // Scale absolute pointer coordinates into the layout size, not the toplevel geometry:
+        // a client that never sets a window geometry reports zero there, which collapsed every
+        // absolute position onto the surface origin.
+        let mut size = mapped.size();
+        if size.w <= 0 || size.h <= 0 {
+            size = mapped.window.geometry().size;
+        }
 
         // Focus the pinned window on the agent seat once, so the client knows it is the one this
         // seat targets. The spike never sends key events through either seat's new path.
@@ -207,9 +212,14 @@ impl State {
         // Maps the event's 0..=extent range onto the window's logical size.
         let location = Point::from((event.x_transformed(size.w), event.y_transformed(size.h)));
 
+        // The focus tuple carries the surface's origin in global space and the motion
+        // carries the pointer's global location; smithay subtracts one from the other.
+        // This path never composes a global position, so it declares the surface at the
+        // origin and passes the surface-local point as the location. Passing the point in
+        // both places collapsed every position onto (0, 0).
         pointer.motion(
             self,
-            Some((surface, location)),
+            Some((surface, Point::from((0.0, 0.0)))),
             &MotionEvent {
                 location,
                 serial: SERIAL_COUNTER.next_serial(),
