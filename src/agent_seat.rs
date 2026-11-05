@@ -1,10 +1,15 @@
-//! Scoped-input spike: an extra `wl_seat` ("agent-0") whose virtual-pointer input is
-//! delivered to one pinned window.
+//! Scoped-input spike: an extra `wl_seat` ("agent-0") whose virtual input is delivered to one
+//! pinned window.
+//!
+//! Pointer events come from `zwlr_virtual_pointer_v1` and are routed by hand into the agent
+//! seat's own pointer handle. Keyboard events need no code here: a `zwp_virtual_keyboard_v1`
+//! created against the agent seat is delivered by smithay straight to that seat's keyboard
+//! focus, which is the pinned window (see `State::agent_pin_target`).
 //!
 //! The whole feature is inert unless `NIRI_AGENT_PIN_APP_ID` is set: with no app id there is
 //! nothing to pin, so every function here bails out before touching any state and niri behaves
-//! exactly like upstream. Pointer events coming from the extra seat never go through
-//! `State::process_input_event`, so seat0's focus, cursor and keyboard routing are untouched.
+//! exactly like upstream. Events coming from the extra seat never go through
+//! `State::process_input_event`, so seat0's focus, cursor and key binds are untouched.
 
 use std::env;
 
@@ -28,6 +33,26 @@ use crate::window::mapped::MappedId;
 
 /// Name of the extra seat. Clients create their virtual pointer on the `wl_seat` with this name.
 pub const SEAT_NAME: &str = "agent-0";
+
+/// What the pin needs to know about one window currently in the layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinCandidate {
+    /// X11/XWayland window. It has no xdg role, hence no surface to deliver input to, and
+    /// `Mapped::toplevel()` panics on it: it is never a candidate.
+    X11,
+    /// Wayland window, with the app id it currently reports (which may be unset).
+    Wayland(Option<String>),
+}
+
+impl PinCandidate {
+    /// App id to match against, or `None` when this window cannot be pinned at all.
+    fn app_id(&self) -> Option<&str> {
+        match self {
+            Self::X11 => None,
+            Self::Wayland(app_id) => app_id.as_deref(),
+        }
+    }
+}
 
 /// Pin bookkeeping for the agent seat.
 ///
@@ -63,24 +88,24 @@ impl AgentPin {
         self.pinned
     }
 
-    /// Reconciles the pin with the windows currently in the layout, given as `(id, app_id)`
+    /// Reconciles the pin with the windows currently in the layout, given as `(id, candidate)`
     /// pairs, and returns whether the pin changed.
     ///
     /// The pin is made once and kept as long as the window lives, so a second window with the
     /// same app id does not steal it. A closed window drops the pin, after which the next
     /// matching window gets pinned.
-    pub fn reconcile(&mut self, windows: &[(MappedId, Option<String>)]) -> bool {
+    pub fn reconcile(&mut self, windows: &[(MappedId, PinCandidate)]) -> bool {
         let Some(want) = self.app_id.as_deref() else {
             return false;
         };
 
         let mut candidate = None;
         let mut pinned_alive = false;
-        for (id, app_id) in windows {
+        for (id, window) in windows {
             if Some(*id) == self.pinned {
                 pinned_alive = true;
             }
-            if candidate.is_none() && app_id.as_deref() == Some(want) {
+            if candidate.is_none() && window.app_id() == Some(want) {
                 candidate = Some(*id);
             }
         }
@@ -122,10 +147,15 @@ impl State {
             .layout
             .windows()
             .map(|(_, mapped)| {
-                (
-                    mapped.id(),
-                    with_toplevel_role(mapped.toplevel(), |role| role.app_id.clone()),
-                )
+                // Ask the smithay window rather than `Mapped::toplevel()`: the latter panics on
+                // X11 windows, which have no xdg role and can never be a target.
+                let candidate = match mapped.window.toplevel() {
+                    Some(toplevel) => PinCandidate::Wayland(with_toplevel_role(toplevel, |role| {
+                        role.app_id.clone()
+                    })),
+                    None => PinCandidate::X11,
+                };
+                (mapped.id(), candidate)
             })
             .collect::<Vec<_>>();
 
@@ -139,7 +169,9 @@ impl State {
             .find(|(_, mapped)| mapped.id() == id)?
             .1;
 
-        let surface = mapped.toplevel().wl_surface().clone();
+        // Bounce on X11 windows instead of panicking: the candidate filter above keeps them out
+        // of the pin, this is only the belt to that pair of braces.
+        let surface = mapped.window.toplevel()?.wl_surface().clone();
         // Scale absolute pointer coordinates into the layout size, not the toplevel geometry:
         // a client that never sets a window geometry reports zero there, which collapsed every
         // absolute position onto the surface origin.
@@ -291,6 +323,11 @@ mod tests {
         Some(app_id.to_owned())
     }
 
+    /// A Wayland window reporting this app id.
+    fn wl(app_id: &str) -> PinCandidate {
+        PinCandidate::Wayland(Some(app_id.to_owned()))
+    }
+
     #[test]
     fn inert_without_env_var() {
         let mut pin = AgentPin::default();
@@ -298,7 +335,7 @@ mod tests {
 
         // Even a window that would match is left alone, and nothing is reported as changed.
         let id = MappedId::next();
-        assert!(!pin.reconcile(&[(id, app_id("foot"))]));
+        assert!(!pin.reconcile(&[(id, wl("foot"))]));
         assert_eq!(pin.pinned(), None);
     }
 
@@ -307,11 +344,11 @@ mod tests {
         let mut pin = AgentPin::with_app_id(app_id("foot"));
         assert!(pin.is_enabled());
 
-        assert!(!pin.reconcile(&[(MappedId::next(), app_id("kitty"))]));
+        assert!(!pin.reconcile(&[(MappedId::next(), wl("kitty"))]));
         assert_eq!(pin.pinned(), None);
 
         // Windows without an app id never match either.
-        assert!(!pin.reconcile(&[(MappedId::next(), None)]));
+        assert!(!pin.reconcile(&[(MappedId::next(), PinCandidate::Wayland(None))]));
         assert_eq!(pin.pinned(), None);
 
         assert!(!pin.reconcile(&[]));
@@ -323,10 +360,7 @@ mod tests {
         let mut pin = AgentPin::with_app_id(app_id("foot"));
         let target = MappedId::next();
 
-        let windows = [
-            (MappedId::next(), app_id("kitty")),
-            (target, app_id("foot")),
-        ];
+        let windows = [(MappedId::next(), wl("kitty")), (target, wl("foot"))];
         assert!(pin.reconcile(&windows));
         assert_eq!(pin.pinned(), Some(target));
 
@@ -335,7 +369,7 @@ mod tests {
 
         // A second window with the same app id does not steal the pin.
         let other = MappedId::next();
-        assert!(!pin.reconcile(&[(target, app_id("foot")), (other, app_id("foot"))]));
+        assert!(!pin.reconcile(&[(target, wl("foot")), (other, wl("foot"))]));
         assert_eq!(pin.pinned(), Some(target));
     }
 
@@ -343,7 +377,7 @@ mod tests {
     fn clears_pin_when_window_closes() {
         let mut pin = AgentPin::with_app_id(app_id("foot"));
         let target = MappedId::next();
-        assert!(pin.reconcile(&[(target, app_id("foot"))]));
+        assert!(pin.reconcile(&[(target, wl("foot"))]));
         assert_eq!(pin.pinned(), Some(target));
 
         // Window closed: the pin is dropped.
@@ -355,7 +389,40 @@ mod tests {
 
         // A window that appears afterwards gets pinned again.
         let new = MappedId::next();
-        assert!(pin.reconcile(&[(new, app_id("foot"))]));
+        assert!(pin.reconcile(&[(new, wl("foot"))]));
         assert_eq!(pin.pinned(), Some(new));
+    }
+
+    #[test]
+    fn x11_windows_are_never_pinned() {
+        let mut pin = AgentPin::with_app_id(app_id("foot"));
+        let x11 = MappedId::next();
+
+        // X11 windows have no xdg role, so they cannot match no matter what their class is.
+        assert!(!pin.reconcile(&[(x11, PinCandidate::X11)]));
+        assert_eq!(pin.pinned(), None);
+
+        // Repeated reconciles stay no-ops: nothing was pinned behind our back.
+        assert!(!pin.reconcile(&[(x11, PinCandidate::X11)]));
+        assert_eq!(pin.pinned(), None);
+    }
+
+    #[test]
+    fn x11_windows_do_not_hide_other_candidates() {
+        let mut pin = AgentPin::with_app_id(app_id("foot"));
+        let target = MappedId::next();
+
+        // The X11 window comes first in the layout: it must not block the Wayland candidate.
+        let layout = [
+            (MappedId::next(), PinCandidate::X11),
+            (target, wl("foot")),
+            (MappedId::next(), wl("kitty")),
+        ];
+        assert!(pin.reconcile(&layout));
+        assert_eq!(pin.pinned(), Some(target));
+
+        // And it keeps winning after the pin has been established.
+        assert!(!pin.reconcile(&layout));
+        assert_eq!(pin.pinned(), Some(target));
     }
 }
