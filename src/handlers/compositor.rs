@@ -222,6 +222,10 @@ impl CompositorHandler for State {
                     );
                     let output = output.cloned();
 
+                    // A matching window may have just appeared: pin it now so the agent seat
+                    // can deliver keyboard input without waiting for a pointer event.
+                    self.refresh_agent_pin();
+
                     // The window state cannot contain Fullscreen and Maximized at once. Therefore,
                     // if the window ended up fullscreen, then we only know that it is also
                     // maximized from the is_pending_maximized variable. Tell the layout about it

@@ -129,6 +129,16 @@ impl State {
             .is_some_and(|seat| seat.name() == SEAT_NAME)
     }
 
+    /// Establishes the pin when a window maps, so keyboard input works before any pointer
+    /// event arrives.
+    ///
+    /// Keyboard events reach the pinned window through the agent seat's keyboard focus, which
+    /// only this path sets. Without a map-time call, a window that is typed into but never
+    /// pointed at would silently receive nothing.
+    pub fn refresh_agent_pin(&mut self) {
+        let _ = self.agent_pin_target();
+    }
+
     /// Reconciles the pin against the current layout and resolves it to the pinned window's
     /// surface plus its logical size.
     ///
