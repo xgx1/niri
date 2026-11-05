@@ -6273,6 +6273,16 @@ impl Niri {
                     return;
                 }
 
+                // A window pinned for scoped agent input must not take the session focus just
+                // because the human's pointer crossed it. The pointer moving over the agent's
+                // window is not a request to work in that window, and stealing focus here would
+                // hand the agent's keystrokes (and the human's) to the wrong side.
+                if let Some(pinned) = self.agent_pin.pinned() {
+                    if self.find_window_by_id(pinned).as_ref() == Some(window) {
+                        return;
+                    }
+                }
+
                 if !self.layout.should_trigger_focus_follows_mouse_on(window) {
                     return;
                 }
