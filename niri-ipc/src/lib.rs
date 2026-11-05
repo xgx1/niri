@@ -87,6 +87,16 @@ pub enum Request {
     PickColor,
     /// Perform an action.
     Action(Action),
+    /// Capture one window to a PNG file without touching the clipboard.
+    ///
+    /// Automation uses this to look at a window without the human asking for a screenshot, so
+    /// it must not replace the primary selection.
+    ScopedScreenshot {
+        /// Id of the window to capture.
+        window: u64,
+        /// File to write the PNG to.
+        path: String,
+    },
     /// Change output configuration temporarily.
     ///
     /// The configuration is changed temporarily and not saved into the config file. If the output

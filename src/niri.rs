@@ -2029,7 +2029,10 @@ impl State {
         self.backend.with_primary_renderer(|renderer| {
             match self.niri.screenshot_ui.capture(renderer) {
                 Ok((size, pixels)) => {
-                    if let Err(err) = self.niri.save_screenshot(size, pixels, write_to_disk, path) {
+                    if let Err(err) =
+                        self.niri
+                            .save_screenshot(size, pixels, write_to_disk, true, path)
+                    {
                         warn!("error saving screenshot: {err:?}");
                     }
                 }
@@ -5589,7 +5592,7 @@ impl Niri {
             elements,
         )?;
 
-        self.save_screenshot(size, pixels, write_to_disk, path)
+        self.save_screenshot(size, pixels, write_to_disk, true, path)
             .context("error saving screenshot")
     }
 
@@ -5600,6 +5603,7 @@ impl Niri {
         mapped: &Mapped,
         write_to_disk: bool,
         show_pointer: bool,
+        copy_to_clipboard: bool,
         path: Option<String>,
     ) -> anyhow::Result<()> {
         let _span = tracy_client::span!("Niri::screenshot_window");
@@ -5657,7 +5661,7 @@ impl Niri {
             elements,
         )?;
 
-        self.save_screenshot(geo.size, pixels, write_to_disk, path)
+        self.save_screenshot(geo.size, pixels, write_to_disk, copy_to_clipboard, path)
             .context("error saving screenshot")
     }
 
@@ -5666,6 +5670,7 @@ impl Niri {
         size: Size<i32, Physical>,
         pixels: Vec<u8>,
         write_to_disk: bool,
+        copy_to_clipboard: bool,
         path_arg: Option<String>,
     ) -> anyhow::Result<()> {
         let path = write_to_disk
@@ -5684,21 +5689,25 @@ impl Niri {
             .flatten();
 
         // Prepare to set the encoded image as our clipboard selection. This must be done from the
-        // main thread.
-        let (tx, rx) = calloop::channel::sync_channel::<Arc<[u8]>>(1);
-        self.event_loop
-            .insert_source(rx, move |event, _, state| match event {
-                calloop::channel::Event::Msg(buf) => {
-                    set_data_device_selection(
-                        &state.niri.display_handle,
-                        &state.niri.seat,
-                        vec![String::from("image/png")],
-                        buf.clone(),
-                    );
-                }
-                calloop::channel::Event::Closed => (),
-            })
-            .unwrap();
+        // main thread. Callers that capture a window without the user asking for it disable this:
+        // replacing the clipboard is a side effect on the human's session.
+        let tx = copy_to_clipboard.then(|| {
+            let (tx, rx) = calloop::channel::sync_channel::<Arc<[u8]>>(1);
+            self.event_loop
+                .insert_source(rx, move |event, _, state| match event {
+                    calloop::channel::Event::Msg(buf) => {
+                        set_data_device_selection(
+                            &state.niri.display_handle,
+                            &state.niri.seat,
+                            vec![String::from("image/png")],
+                            buf.clone(),
+                        );
+                    }
+                    calloop::channel::Event::Closed => (),
+                })
+                .unwrap();
+            tx
+        });
 
         // Prepare to send screenshot completion event back to main thread.
         let (event_tx, event_rx) = calloop::channel::sync_channel::<Option<String>>(1);
@@ -5722,7 +5731,9 @@ impl Niri {
             }
 
             let buf: Arc<[u8]> = Arc::from(buf.into_boxed_slice());
-            let _ = tx.send(buf.clone());
+            if let Some(tx) = tx {
+                let _ = tx.send(buf.clone());
+            }
 
             let mut image_path = None;
 

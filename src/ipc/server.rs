@@ -378,6 +378,35 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             let color = result.map_err(|_| String::from("error getting picked color"))?;
             Response::PickedColor(color)
         }
+        Request::ScopedScreenshot { window, path } => {
+            ctx.event_loop.insert_idle(move |state| {
+                let target = state
+                    .niri
+                    .layout
+                    .windows()
+                    .find(|(_, mapped)| mapped.id().get() == window);
+                let Some((Some(monitor), mapped)) = target else {
+                    warn!("scoped screenshot: no window with id {window}");
+                    return;
+                };
+                let output = monitor.output().clone();
+                state.backend.with_primary_renderer(|renderer| {
+                    let res = state.niri.screenshot_window(
+                        renderer,
+                        &output,
+                        mapped,
+                        true,
+                        false,
+                        false,
+                        Some(path.clone()),
+                    );
+                    if let Err(err) = res {
+                        warn!("error taking scoped screenshot: {err:?}");
+                    }
+                });
+            });
+            Response::Handled
+        }
         Request::Action(action) => {
             validate_action(&action)?;
 
