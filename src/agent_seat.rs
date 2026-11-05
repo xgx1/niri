@@ -20,7 +20,7 @@ use smithay::input::pointer::{ButtonEvent, MotionEvent};
 use smithay::input::Seat;
 use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Logical, Point, Size, SERIAL_COUNTER};
+use smithay::utils::{Logical, Point, Rectangle, Size, SERIAL_COUNTER};
 
 use crate::layout::LayoutElement as _;
 use crate::niri::State;
@@ -206,7 +206,7 @@ impl State {
     ///
     // ponytail: full layout scan per event; cache surface + size if this ever shows up in a
     // profile.
-    fn agent_pin_target(&mut self) -> Option<(WlSurface, Size<i32, Logical>)> {
+    fn agent_pin_target(&mut self) -> Option<(WlSurface, Rectangle<i32, Logical>)> {
         if !self.niri.agent_pin.is_enabled() {
             self.drop_agent_focus();
             return None;
@@ -230,6 +230,12 @@ impl State {
             .collect::<Vec<_>>();
 
         let pin_changed = self.niri.agent_pin.reconcile(&windows);
+        tracing::debug!(
+            candidates = ?windows,
+            pinned = ?self.niri.agent_pin.pinned(),
+            pin_changed,
+            "agent seat: reconcile"
+        );
         let Some(id) = self.niri.agent_pin.pinned() else {
             self.drop_agent_focus();
             return None;
@@ -245,12 +251,14 @@ impl State {
         // Bounce on X11 windows instead of panicking: the candidate filter above keeps them out
         // of the pin, this is only the belt to that pair of braces.
         let surface = mapped.window.toplevel()?.wl_surface().clone();
-        // Scale absolute pointer coordinates into the layout size, not the toplevel geometry:
-        // a client that never sets a window geometry reports zero there, which collapsed every
-        // absolute position onto the surface origin.
-        let mut size = mapped.size();
-        if size.w <= 0 || size.h <= 0 {
-            size = mapped.window.geometry().size;
+        // Absolute positions map onto the window geometry, and the geometry's own origin is
+        // where it sits inside the client's surface. Clients that draw client-side shadows put
+        // the geometry at an offset; scaling onto the tile instead shifted every click by that
+        // offset and made buttons unclickable.
+        let mut geometry = mapped.window.geometry();
+        if geometry.size.w <= 0 || geometry.size.h <= 0 {
+            let size = mapped.size();
+            geometry = Rectangle::from_size(size);
         }
 
         // Focus the pinned window on the agent seat once, so the client knows it is the one this
@@ -262,7 +270,7 @@ impl State {
             }
         }
 
-        Some((surface, size))
+        Some((surface, geometry))
     }
 
     /// Delivers a virtual-pointer motion event from the agent seat to the pinned window.
@@ -287,7 +295,7 @@ impl State {
 
         pointer.motion(
             self,
-            Some((surface, location)),
+            Some((surface, Point::from((0., 0.)))),
             &MotionEvent {
                 location,
                 serial: SERIAL_COUNTER.next_serial(),
@@ -307,15 +315,19 @@ impl State {
         if !self.is_agent_seat(event.pointer().seat()) {
             return false;
         }
-        let Some((surface, size)) = self.agent_pin_target() else {
+        let Some((surface, geometry)) = self.agent_pin_target() else {
             return true;
         };
         let Some(pointer) = self.niri.agent_seat.get_pointer() else {
             return true;
         };
 
-        // Maps the event's 0..=extent range onto the window's logical size.
-        let location = Point::from((event.x_transformed(size.w), event.y_transformed(size.h)));
+        // Maps the event's 0..=extent range onto the window geometry, offset by where that
+        // geometry sits inside the surface so a client-side shadow does not skew the click.
+        let location = Point::from((
+            geometry.loc.x as f64 + event.x_transformed(geometry.size.w),
+            geometry.loc.y as f64 + event.y_transformed(geometry.size.h),
+        ));
 
         // The focus tuple carries the surface's origin in global space and the motion
         // carries the pointer's global location; smithay subtracts one from the other.
@@ -332,6 +344,7 @@ impl State {
             },
         );
         pointer.frame(self);
+        tracing::debug!(?location, ?geometry, "agent seat: absolute motion");
 
         true
     }
