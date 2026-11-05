@@ -2409,8 +2409,9 @@ impl Niri {
         add_seat_keyboard(&mut seat, &config_);
         seat.add_pointer();
 
-        // Extra seat for the scoped-input spike. Its keyboard only exists so that the pinned
-        // window can be given focus on this seat; no key events are routed through it.
+        // Extra seat for the scoped-input spike. Its keyboard is what delivers keys to the
+        // pinned window: a `zwp_virtual_keyboard_v1` created against this seat is sent by
+        // smithay straight to this seat's keyboard focus, which is the pinned surface.
         let mut agent_seat: Seat<State> = seat_state.new_wl_seat(&display_handle, SEAT_NAME);
         add_seat_keyboard(&mut agent_seat, &config_);
         agent_seat.add_pointer();
