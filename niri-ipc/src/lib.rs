@@ -87,6 +87,14 @@ pub enum Request {
     PickColor,
     /// Perform an action.
     Action(Action),
+    /// Choose the window that scoped input is delivered to.
+    ///
+    /// `None` clears the choice. The window must be a Wayland window; X11 windows cannot
+    /// receive scoped input.
+    ScopedTarget {
+        /// Id of the window to deliver to, or `None` to stop delivering.
+        window: Option<u64>,
+    },
     /// Capture one window to a PNG file without touching the clipboard.
     ///
     /// Automation uses this to look at a window without the human asking for a screenshot, so

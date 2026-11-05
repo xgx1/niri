@@ -15,6 +15,7 @@ use directories::BaseDirs;
 use futures_util::io::{AsyncReadExt, BufReader};
 use futures_util::{select_biased, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, FutureExt as _};
 use niri_config::OutputName;
+use crate::window::mapped::MappedId;
 use niri_ipc::state::{EventStreamState, EventStreamStatePart as _};
 use niri_ipc::{
     Action, Event, KeyboardLayouts, OutputConfigChanged, Overview, Reply, Request, Response,
@@ -377,6 +378,14 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             let result = rx.recv().await;
             let color = result.map_err(|_| String::from("error getting picked color"))?;
             Response::PickedColor(color)
+        }
+        Request::ScopedTarget { window } => {
+            ctx.event_loop.insert_idle(move |state| {
+                let target = window.map(MappedId::from_raw);
+                state.niri.agent_pin.set_target(target);
+                state.refresh_agent_pin();
+            });
+            Response::Handled
         }
         Request::ScopedScreenshot { window, path } => {
             ctx.event_loop.insert_idle(move |state| {

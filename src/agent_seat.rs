@@ -45,6 +45,11 @@ pub enum PinCandidate {
 }
 
 impl PinCandidate {
+    /// Whether input can be delivered to this window at all.
+    fn can_receive(&self) -> bool {
+        matches!(self, Self::Wayland(_))
+    }
+
     /// App id to match against, or `None` when this window cannot be pinned at all.
     fn app_id(&self) -> Option<&str> {
         match self {
@@ -60,8 +65,11 @@ impl PinCandidate {
 /// maps "app id to look for" plus "windows currently in the layout" to "window to pin".
 #[derive(Debug, Default)]
 pub struct AgentPin {
-    /// App id to pin, from `NIRI_AGENT_PIN_APP_ID`. `None` disables the whole feature.
+    /// App id to pin, from `NIRI_AGENT_PIN_APP_ID`. `None` disables the feature unless a
+    /// target was chosen over IPC.
     app_id: Option<String>,
+    /// Window chosen over IPC, which wins over `app_id`.
+    explicit: Option<MappedId>,
     /// Window the agent seat's pointer is currently delivered to.
     pinned: Option<MappedId>,
 }
@@ -75,13 +83,23 @@ impl AgentPin {
     pub fn with_app_id(app_id: Option<String>) -> Self {
         Self {
             app_id,
+            explicit: None,
             pinned: None,
         }
     }
 
     /// Whether the feature is enabled at all.
     pub fn is_enabled(&self) -> bool {
-        self.app_id.is_some()
+        self.app_id.is_some() || self.explicit.is_some()
+    }
+
+    /// Chooses the window to deliver to, replacing any previous choice.
+    ///
+    /// The pin is cleared here and resolved again from the layout, so an ID belonging to a
+    /// window that is already gone cannot receive input.
+    pub fn set_target(&mut self, target: Option<MappedId>) {
+        self.explicit = target;
+        self.pinned = None;
     }
 
     pub fn pinned(&self) -> Option<MappedId> {
@@ -95,22 +113,35 @@ impl AgentPin {
     /// same app id does not steal it. A closed window drops the pin, after which the next
     /// matching window gets pinned.
     pub fn reconcile(&mut self, windows: &[(MappedId, PinCandidate)]) -> bool {
-        let Some(want) = self.app_id.as_deref() else {
-            return false;
+        let pinned = if let Some(want) = self.explicit {
+            // An explicit choice is only honoured while that window is still deliverable.
+            windows
+                .iter()
+                .find(|(id, window)| *id == want && window.can_receive())
+                .map(|(id, _)| *id)
+        } else {
+            let Some(want) = self.app_id.as_deref() else {
+                return false;
+            };
+
+            let mut candidate = None;
+            let mut pinned_alive = false;
+            for (id, window) in windows {
+                if Some(*id) == self.pinned {
+                    pinned_alive = true;
+                }
+                if candidate.is_none() && window.app_id() == Some(want) {
+                    candidate = Some(*id);
+                }
+            }
+
+            if pinned_alive {
+                self.pinned
+            } else {
+                candidate
+            }
         };
 
-        let mut candidate = None;
-        let mut pinned_alive = false;
-        for (id, window) in windows {
-            if Some(*id) == self.pinned {
-                pinned_alive = true;
-            }
-            if candidate.is_none() && window.app_id() == Some(want) {
-                candidate = Some(*id);
-            }
-        }
-
-        let pinned = if pinned_alive { self.pinned } else { candidate };
         let changed = pinned != self.pinned;
         self.pinned = pinned;
         changed
@@ -139,6 +170,34 @@ impl State {
         let _ = self.agent_pin_target();
     }
 
+    /// Drops the agent seat's own focus without touching seat0.
+    ///
+    /// Clearing the target, or the target window closing, has to release the keyboard and
+    /// pointer the same way: both handle focus per seat, so leaving them set would keep
+    /// delivering input to a window nobody asked to control.
+    fn drop_agent_focus(&mut self) {
+        let serial = SERIAL_COUNTER.next_serial();
+        if let Some(keyboard) = self.niri.agent_seat.get_keyboard() {
+            if keyboard.current_focus().is_some() {
+                keyboard.set_focus(self, None, serial);
+            }
+        }
+        if let Some(pointer) = self.niri.agent_seat.get_pointer() {
+            if pointer.current_focus().is_some() {
+                pointer.motion(
+                    self,
+                    None,
+                    &MotionEvent {
+                        location: Point::from((0., 0.)),
+                        serial,
+                        time: 0,
+                    },
+                );
+                pointer.frame(self);
+            }
+        }
+    }
+
     /// Reconciles the pin against the current layout and resolves it to the pinned window's
     /// surface plus its logical size.
     ///
@@ -149,6 +208,7 @@ impl State {
     // profile.
     fn agent_pin_target(&mut self) -> Option<(WlSurface, Size<i32, Logical>)> {
         if !self.niri.agent_pin.is_enabled() {
+            self.drop_agent_focus();
             return None;
         }
 
@@ -170,7 +230,10 @@ impl State {
             .collect::<Vec<_>>();
 
         let pin_changed = self.niri.agent_pin.reconcile(&windows);
-        let id = self.niri.agent_pin.pinned()?;
+        let Some(id) = self.niri.agent_pin.pinned() else {
+            self.drop_agent_focus();
+            return None;
+        };
 
         let mapped = self
             .niri
@@ -434,5 +497,47 @@ mod tests {
         // And it keeps winning after the pin has been established.
         assert!(!pin.reconcile(&layout));
         assert_eq!(pin.pinned(), Some(target));
+    }
+
+    #[test]
+    fn an_ipc_target_pins_without_an_app_id() {
+        let mut pin = AgentPin::default();
+        assert!(!pin.is_enabled());
+
+        let target = MappedId::next();
+        pin.set_target(Some(target));
+        assert!(pin.is_enabled());
+
+        // Any Wayland window can be chosen; the app id it reports does not matter.
+        assert!(pin.reconcile(&[(target, wl("anything"))]));
+        assert_eq!(pin.pinned(), Some(target));
+    }
+
+    #[test]
+    fn an_ipc_target_that_is_not_deliverable_stays_unpinned() {
+        let mut pin = AgentPin::default();
+        let target = MappedId::next();
+        pin.set_target(Some(target));
+
+        // X11 windows cannot receive scoped input, and a gone window must not stay pinned.
+        assert!(!pin.reconcile(&[(target, PinCandidate::X11)]));
+        assert_eq!(pin.pinned(), None);
+        assert!(!pin.reconcile(&[]));
+        assert_eq!(pin.pinned(), None);
+    }
+
+    #[test]
+    fn clearing_the_ipc_target_disables_the_feature_again() {
+        let mut pin = AgentPin::default();
+        let target = MappedId::next();
+        pin.set_target(Some(target));
+        assert!(pin.reconcile(&[(target, wl("foot"))]));
+        assert_eq!(pin.pinned(), Some(target));
+
+        pin.set_target(None);
+        assert!(!pin.is_enabled());
+        assert_eq!(pin.pinned(), None);
+        assert!(!pin.reconcile(&[(target, wl("foot"))]));
+        assert_eq!(pin.pinned(), None);
     }
 }

@@ -217,6 +217,14 @@ impl MappedId {
         self.0
     }
 
+    /// Reconstructs an ID received over IPC.
+    ///
+    /// The value carries no authority: callers look the window up in the layout and ignore the
+    /// ID when no window has it.
+    pub fn from_raw(raw: u64) -> Self {
+        MappedId(raw)
+    }
+
     /// Converts the ID to a string that can be used as an identifier in
     /// ext_foreign_toplevel_handle_v1::identifier
     ///
