@@ -756,6 +756,7 @@ impl State {
                             show_pointer,
                             true,
                             path,
+                            None,
                         ) {
                             warn!("error taking screenshot: {err:?}");
                         }
@@ -781,6 +782,7 @@ impl State {
                             show_pointer,
                             true,
                             path,
+                            None,
                         ) {
                             warn!("error taking screenshot: {err:?}");
                         }

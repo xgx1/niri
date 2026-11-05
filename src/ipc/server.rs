@@ -388,6 +388,9 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             Response::Handled
         }
         Request::ScopedScreenshot { window, path } => {
+            // Encoding and writing the PNG happen on a worker thread, so the reply has to wait for
+            // its result: reporting Handled first means the caller can find no file on disk.
+            let (done_tx, done_rx) = async_channel::bounded(1);
             ctx.event_loop.insert_idle(move |state| {
                 let target = state
                     .niri
@@ -396,10 +399,13 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                     .find(|(_, mapped)| mapped.id().get() == window);
                 let Some((Some(monitor), mapped)) = target else {
                     warn!("scoped screenshot: no window with id {window}");
+                    let _ = done_tx.send_blocking(Err(anyhow::anyhow!(
+                        "scoped screenshot: no window with id {window}"
+                    )));
                     return;
                 };
                 let output = monitor.output().clone();
-                state.backend.with_primary_renderer(|renderer| {
+                let ran = state.backend.with_primary_renderer(|renderer| {
                     let res = state.niri.screenshot_window(
                         renderer,
                         &output,
@@ -408,13 +414,33 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
                         false,
                         false,
                         Some(path.clone()),
+                        Some(done_tx.clone()),
                     );
                     if let Err(err) = res {
                         warn!("error taking scoped screenshot: {err:?}");
+                        let _ = done_tx.send_blocking(Err(anyhow::anyhow!(
+                            "error taking scoped screenshot: {err:?}"
+                        )));
                     }
                 });
+                if ran.is_none() {
+                    warn!("scoped screenshot: no primary renderer");
+                    let _ = done_tx.send_blocking(Err(anyhow::anyhow!(
+                        "scoped screenshot: no primary renderer"
+                    )));
+                }
+                // Dropping done_tx without a result would also surface as an error below.
             });
-            Response::Handled
+
+            match done_rx.recv().await {
+                Ok(Ok(_path)) => Response::Handled,
+                Ok(Err(err)) => return Err(err.to_string()),
+                Err(_) => {
+                    return Err(String::from(
+                        "scoped screenshot finished without a result",
+                    ))
+                }
+            }
         }
         Request::Action(action) => {
             validate_action(&action)?;

@@ -2031,7 +2031,7 @@ impl State {
                 Ok((size, pixels)) => {
                     if let Err(err) =
                         self.niri
-                            .save_screenshot(size, pixels, write_to_disk, true, path)
+                            .save_screenshot(size, pixels, write_to_disk, true, path, None)
                     {
                         warn!("error saving screenshot: {err:?}");
                     }
@@ -5592,7 +5592,7 @@ impl Niri {
             elements,
         )?;
 
-        self.save_screenshot(size, pixels, write_to_disk, true, path)
+        self.save_screenshot(size, pixels, write_to_disk, true, path, None)
             .context("error saving screenshot")
     }
 
@@ -5605,6 +5605,7 @@ impl Niri {
         show_pointer: bool,
         copy_to_clipboard: bool,
         path: Option<String>,
+        done: Option<async_channel::Sender<anyhow::Result<PathBuf>>>,
     ) -> anyhow::Result<()> {
         let _span = tracy_client::span!("Niri::screenshot_window");
 
@@ -5661,10 +5662,18 @@ impl Niri {
             elements,
         )?;
 
-        self.save_screenshot(geo.size, pixels, write_to_disk, copy_to_clipboard, path)
-            .context("error saving screenshot")
+        self.save_screenshot(
+            geo.size,
+            pixels,
+            write_to_disk,
+            copy_to_clipboard,
+            path,
+            done,
+        )
+        .context("error saving screenshot")
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn save_screenshot(
         &self,
         size: Size<i32, Physical>,
@@ -5672,6 +5681,7 @@ impl Niri {
         write_to_disk: bool,
         copy_to_clipboard: bool,
         path_arg: Option<String>,
+        done: Option<async_channel::Sender<anyhow::Result<PathBuf>>>,
     ) -> anyhow::Result<()> {
         let path = write_to_disk
             .then(|| {
@@ -5727,6 +5737,11 @@ impl Niri {
             let w = std::io::Cursor::new(&mut buf);
             if let Err(err) = write_png_rgba8(w, size.w as u32, size.h as u32, &pixels) {
                 warn!("error encoding screenshot image: {err:?}");
+                if let Some(done) = done {
+                    let _ = done.send_blocking(Err(anyhow::anyhow!(
+                        "error encoding screenshot image: {err:?}"
+                    )));
+                }
                 return;
             }
 
@@ -5754,9 +5769,17 @@ impl Niri {
                 }
 
                 match std::fs::write(&path, buf) {
-                    Ok(()) => image_path = Some(path),
+                    Ok(()) => {
+                        image_path = Some(path);
+                    }
                     Err(err) => {
                         warn!("error saving screenshot image: {err:?}");
+                        if let Some(done) = done {
+                            let _ = done.send_blocking(Err(anyhow::anyhow!(
+                                "error saving screenshot image: {err:?}"
+                            )));
+                        }
+                        return;
                     }
                 }
             } else {
@@ -5774,6 +5797,15 @@ impl Niri {
                 .and_then(|p| p.to_str())
                 .map(|s| s.to_owned());
             let _ = event_tx.send(path_string);
+
+            // The IPC caller must not report success before the file exists, so let it wait for
+            // the encode thread's actual outcome.
+            if let Some(done) = done {
+                let _ = done.send_blocking(match image_path {
+                    Some(path) => Ok(path),
+                    None => Err(anyhow::anyhow!("screenshot was not written to disk")),
+                });
+            }
         });
 
         Ok(())
