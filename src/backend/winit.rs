@@ -195,19 +195,27 @@ impl Winit {
                 .context("error building dmabuf feedback")
         };
 
-        // Fallback to dmabuf v3 if we failed to build feedback.
+        // Only advertise dmabuf when we have a real DRM render node to import from.
+        //
+        // The utf8 fallback used to advertise the generic dmabuf v3 protocol with the
+        // renderer's formats even when the EGL device had no render node (the usual case
+        // for the winit backend nested inside a software X server). Clients then hand us
+        // buffers from a different driver, dmabuf import fails to mmap them, and the
+        // following draw can take down the software rasterizer with it (observed as a
+        // SIGSEGV in llvmpipe inside a nested agent desktop). Without the global, clients
+        // fall back to wl_shm, which is what software rendering wants anyway.
         let dmabuf_global = match default_feedback() {
-            Ok(feedback) => niri
+            Ok(feedback) => Some(niri
                 .dmabuf_state
-                .create_global_with_default_feedback::<State>(&niri.display_handle, &feedback),
+                .create_global_with_default_feedback::<State>(&niri.display_handle, &feedback)),
             Err(err) => {
-                debug!("failed building default dmabuf feedback, falling back to v3: {err:?}");
-                let primary_formats = renderer.dmabuf_formats();
-                niri.dmabuf_state
-                    .create_global::<State>(&niri.display_handle, primary_formats)
+                info!("no EGL device render node, not advertising dmabuf: {err:?}");
+                None
             }
         };
-        assert!(self.dmabuf_global.replace(dmabuf_global).is_none());
+        if let Some(global) = dmabuf_global {
+            assert!(self.dmabuf_global.replace(global).is_none());
+        }
     }
 
     pub fn seat_name(&self) -> String {
