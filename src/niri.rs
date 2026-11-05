@@ -114,6 +114,7 @@ use wayland_server::protocol::wl_output::WlOutput;
 
 #[cfg(feature = "dbus")]
 use crate::a11y::A11y;
+use crate::agent_seat::{AgentPin, SEAT_NAME};
 use crate::animation::Clock;
 use crate::backend::tty::SurfaceDmabufFeedback;
 use crate::backend::{Backend, Headless, RenderResult, Tty, Winit};
@@ -322,6 +323,10 @@ pub struct Niri {
     pub single_pixel_buffer_state: SinglePixelBufferState,
 
     pub seat: Seat<State>,
+    /// Extra seat for scoped agent input; see [`crate::agent_seat`].
+    pub agent_seat: Seat<State>,
+    /// Window the agent seat's pointer is pinned to. Inert unless `NIRI_AGENT_PIN_APP_ID` is set.
+    pub agent_pin: AgentPin,
     /// Scancodes of the keys to suppress.
     pub suppressed_keys: HashSet<Keycode>,
     /// Button codes of the mouse buttons to suppress.
@@ -2222,6 +2227,37 @@ impl State {
     }
 }
 
+/// Adds a keyboard to `seat` with the configured keymap, falling back to the default keymap if it
+/// fails to load, and applies the configured numlock state.
+fn add_seat_keyboard(seat: &mut Seat<State>, config: &Config) {
+    let keyboard = match seat.add_keyboard(
+        config.input.keyboard.xkb.to_xkb_config(),
+        config.input.keyboard.repeat_delay.into(),
+        config.input.keyboard.repeat_rate.into(),
+    ) {
+        Err(err) => {
+            if let smithay::input::keyboard::Error::BadKeymap = err {
+                warn!("error loading the configured xkb keymap, trying default");
+            } else {
+                warn!("error adding keyboard: {err:?}");
+            }
+            seat.add_keyboard(
+                Default::default(),
+                config.input.keyboard.repeat_delay.into(),
+                config.input.keyboard.repeat_rate.into(),
+            )
+            .unwrap()
+        }
+        Ok(keyboard) => keyboard,
+    };
+
+    if config.input.keyboard.numlock {
+        let mut modifier_state = keyboard.modifier_state();
+        modifier_state.num_lock = true;
+        keyboard.set_modifier_state(modifier_state);
+    }
+}
+
 impl Niri {
     pub fn new(
         config: Rc<RefCell<Config>>,
@@ -2370,32 +2406,14 @@ impl Niri {
         let single_pixel_buffer_state = SinglePixelBufferState::new::<State>(&display_handle);
 
         let mut seat: Seat<State> = seat_state.new_wl_seat(&display_handle, backend.seat_name());
-        let keyboard = match seat.add_keyboard(
-            config_.input.keyboard.xkb.to_xkb_config(),
-            config_.input.keyboard.repeat_delay.into(),
-            config_.input.keyboard.repeat_rate.into(),
-        ) {
-            Err(err) => {
-                if let smithay::input::keyboard::Error::BadKeymap = err {
-                    warn!("error loading the configured xkb keymap, trying default");
-                } else {
-                    warn!("error adding keyboard: {err:?}");
-                }
-                seat.add_keyboard(
-                    Default::default(),
-                    config_.input.keyboard.repeat_delay.into(),
-                    config_.input.keyboard.repeat_rate.into(),
-                )
-                .unwrap()
-            }
-            Ok(keyboard) => keyboard,
-        };
-        if config_.input.keyboard.numlock {
-            let mut modifier_state = keyboard.modifier_state();
-            modifier_state.num_lock = true;
-            keyboard.set_modifier_state(modifier_state);
-        }
+        add_seat_keyboard(&mut seat, &config_);
         seat.add_pointer();
+
+        // Extra seat for the scoped-input spike. Its keyboard only exists so that the pinned
+        // window can be given focus on this seat; no key events are routed through it.
+        let mut agent_seat: Seat<State> = seat_state.new_wl_seat(&display_handle, SEAT_NAME);
+        add_seat_keyboard(&mut agent_seat, &config_);
+        agent_seat.add_pointer();
 
         let cursor_shape_manager_state = CursorShapeManagerState::new::<State>(&display_handle);
         let cursor_manager =
@@ -2563,6 +2581,8 @@ impl Niri {
             single_pixel_buffer_state,
 
             seat,
+            agent_seat,
+            agent_pin: AgentPin::from_env(),
             keyboard_focus: KeyboardFocus::Layout { surface: None },
             layer_shell_on_demand_focus: None,
             idle_inhibiting_surfaces: HashSet::new(),

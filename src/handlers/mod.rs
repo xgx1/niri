@@ -72,6 +72,7 @@ use smithay::{
     delegate_viewporter, delegate_virtual_keyboard_manager, delegate_xdg_activation,
 };
 
+use crate::agent_seat::SEAT_NAME;
 pub use crate::handlers::xdg_shell::KdeDecorationsModeState;
 use crate::layout::workspace::WorkspaceId;
 use crate::layout::ActivateWindow;
@@ -107,7 +108,12 @@ impl SeatHandler for State {
         &mut self.niri.seat_state
     }
 
-    fn cursor_image(&mut self, _seat: &Seat<Self>, mut image: CursorImageStatus) {
+    fn cursor_image(&mut self, seat: &Seat<Self>, mut image: CursorImageStatus) {
+        // The extra agent seat must never change the cursor the user sees.
+        if seat.name() == SEAT_NAME {
+            return;
+        }
+
         // FIXME: this hack should be removable once the screenshot UI is tracked with a
         // PointerFocus properly.
         if self.niri.screenshot_ui.is_open() {
@@ -668,21 +674,37 @@ impl VirtualPointerHandler for State {
         &mut self.niri.virtual_pointer_state
     }
 
+    // Pointer events from the extra agent seat are delivered straight to its pinned window by
+    // `crate::agent_seat`, never through `process_input_event`, so seat0 is unaffected. The
+    // returned flag is false for pointers that are not on the agent seat, which keeps the
+    // original behavior for them.
     fn on_virtual_pointer_motion(&mut self, event: VirtualPointerMotionEvent) {
+        if self.agent_seat_pointer_motion(&event) {
+            return;
+        }
         self.process_input_event(InputEvent::<VirtualPointerInputBackend>::PointerMotion { event });
     }
 
     fn on_virtual_pointer_motion_absolute(&mut self, event: VirtualPointerMotionAbsoluteEvent) {
+        if self.agent_seat_pointer_motion_absolute(&event) {
+            return;
+        }
         self.process_input_event(
             InputEvent::<VirtualPointerInputBackend>::PointerMotionAbsolute { event },
         );
     }
 
     fn on_virtual_pointer_button(&mut self, event: VirtualPointerButtonEvent) {
+        if self.agent_seat_pointer_button(&event) {
+            return;
+        }
         self.process_input_event(InputEvent::<VirtualPointerInputBackend>::PointerButton { event });
     }
 
     fn on_virtual_pointer_axis(&mut self, event: VirtualPointerAxisEvent) {
+        if self.agent_seat_pointer_axis(&event) {
+            return;
+        }
         self.process_input_event(InputEvent::<VirtualPointerInputBackend>::PointerAxis { event });
     }
 }

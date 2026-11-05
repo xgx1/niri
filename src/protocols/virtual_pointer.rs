@@ -99,6 +99,12 @@ pub struct VirtualPointerMotionEvent {
     dy: f64,
 }
 
+impl VirtualPointerMotionEvent {
+    pub fn pointer(&self) -> &VirtualPointer {
+        &self.pointer
+    }
+}
+
 impl Event<VirtualPointerInputBackend> for VirtualPointerMotionEvent {
     fn time(&self) -> u64 {
         self.time as u64 * 1000 // millis to micros
@@ -136,6 +142,12 @@ pub struct VirtualPointerMotionAbsoluteEvent {
     y_extent: u32,
 }
 
+impl VirtualPointerMotionAbsoluteEvent {
+    pub fn pointer(&self) -> &VirtualPointer {
+        &self.pointer
+    }
+}
+
 impl Event<VirtualPointerInputBackend> for VirtualPointerMotionAbsoluteEvent {
     fn time(&self) -> u64 {
         self.time as u64 * 1000 // millis to micros
@@ -171,6 +183,12 @@ pub struct VirtualPointerButtonEvent {
     state: ButtonState,
 }
 
+impl VirtualPointerButtonEvent {
+    pub fn pointer(&self) -> &VirtualPointer {
+        &self.pointer
+    }
+}
+
 impl Event<VirtualPointerInputBackend> for VirtualPointerButtonEvent {
     fn time(&self) -> u64 {
         self.time as u64 * 1000 // millis to micros
@@ -194,6 +212,17 @@ impl PointerButtonEvent<VirtualPointerInputBackend> for VirtualPointerButtonEven
 pub struct VirtualPointerAxisEvent {
     pointer: VirtualPointer,
     frame: AxisFrame,
+}
+
+impl VirtualPointerAxisEvent {
+    pub fn pointer(&self) -> &VirtualPointer {
+        &self.pointer
+    }
+
+    /// The accumulated axis frame of this event.
+    pub fn axis_frame(&self) -> AxisFrame {
+        self.frame
+    }
 }
 
 impl Event<VirtualPointerInputBackend> for VirtualPointerAxisEvent {
