@@ -516,6 +516,10 @@ window-rule {
 }
 ```
 
+<sup>dsh fork</sup> `open-focused false` also makes niri ignore the window's own xdg-activation
+requests, so a window that opens on a hidden workspace cannot yank the view there later. Upstream niri
+honours client activation requests regardless of this rule.
+
 You can also set this to `true` to focus the window, even if normally it wouldn't get auto-focused.
 
 ```kdl

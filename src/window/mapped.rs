@@ -367,6 +367,14 @@ impl Mapped {
         self.id
     }
 
+    /// Up-to-date resolved window rules for this mapped window.
+    ///
+    /// The inherent method shadows the `WindowRef` trait one so call sites outside the
+    /// layout can read rules (e.g. to honour `open-focused` for activation requests).
+    pub fn rules(&self) -> &ResolvedWindowRules {
+        &self.rules
+    }
+
     pub fn credentials(&self) -> Option<&Credentials> {
         self.credentials.as_ref()
     }

@@ -849,6 +849,14 @@ impl XdgActivationHandler for State {
                 if token_data.user_data.get::<UrgentOnlyMarker>().is_some() {
                     mapped.set_urgent(true);
                     self.niri.queue_redraw_all();
+                } else if mapped.rules().open_focused == Some(false) {
+                    // `open-focused false` 也压掉客户端自己的 activation 请求：否则一个已经在
+                    // 映射状态的子窗（UE 的资产编辑器/VR Preview 这类）只要请求激活，就能把人
+                    // 的视图拽到它所在的——可能是隐藏的——工作区。
+                    debug!(
+                        id = ?mapped.id(),
+                        "ignoring activation request: window rules say open-focused false"
+                    );
                 } else {
                     self.niri.layout.activate_window(&window);
                     self.niri.layer_shell_on_demand_focus = None;
